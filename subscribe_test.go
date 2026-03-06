@@ -1,6 +1,7 @@
 package natsx_test
 
 import (
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -107,26 +108,37 @@ func TestSubscribeWithMiddleware(t *testing.T) {
 	}
 	defer c.Close()
 
+	var mu sync.Mutex
 	var order []string
 	done := make(chan struct{}, 1)
 
 	mw1 := func(next natsx.MsgHandler) natsx.MsgHandler {
 		return func(msg *natsx.Msg) {
+			mu.Lock()
 			order = append(order, "mw1-before")
+			mu.Unlock()
 			next(msg)
+			mu.Lock()
 			order = append(order, "mw1-after")
+			mu.Unlock()
 		}
 	}
 	mw2 := func(next natsx.MsgHandler) natsx.MsgHandler {
 		return func(msg *natsx.Msg) {
+			mu.Lock()
 			order = append(order, "mw2-before")
+			mu.Unlock()
 			next(msg)
+			mu.Lock()
 			order = append(order, "mw2-after")
+			mu.Unlock()
 		}
 	}
 
 	_, err = c.Subscribe("mw.test", func(msg *natsx.Msg) {
+		mu.Lock()
 		order = append(order, "handler")
+		mu.Unlock()
 		done <- struct{}{}
 	}, mw1, mw2)
 	if err != nil {
@@ -142,6 +154,8 @@ func TestSubscribeWithMiddleware(t *testing.T) {
 		t.Fatal("timed out")
 	}
 
+	mu.Lock()
+	defer mu.Unlock()
 	expected := []string{"mw1-before", "mw2-before", "handler", "mw2-after", "mw1-after"}
 	if len(order) != len(expected) {
 		t.Fatalf("expected order %v, got %v", expected, order)
