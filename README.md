@@ -3,7 +3,7 @@
 A high-level, production-ready Go wrapper around [nats.go](https://github.com/nats-io/nats.go) — **robust, fast, and dead-simple**.
 
 ```
-go get github.com/vsys-soham/natsx
+go get github.com/phoenix/natsx
 ```
 
 ## Features
@@ -13,10 +13,13 @@ go get github.com/vsys-soham/natsx
 | **One-liner connect** | Sensible defaults, zero boilerplate |
 | **Functional options** | `WithURL`, `WithAuth`, `WithTLS` … extensible without breaking |
 | **Pub / Sub / Request** | Raw bytes, JSON, context-aware, headers — all covered |
+| **Typed generics** | `Publish[T]`, `Subscribe[T]`, `Request[Req,Resp]` — compile-time type safety |
+| **Message envelope** | Optional `Envelope[T]` with ID, timestamp, source, correlation-ID |
 | **Queue groups** | Built-in load-balanced subscriptions |
-| **JetStream** | First-class publish, subscribe, pull-subscribe via `jetstream` package |
+| **JetStream** | Stream/consumer management, idempotent publish, DLQ, ack helpers |
 | **Middleware** | Composable chain — recovery, logging, timeout, metrics, tracing, correlation-ID, concurrency limit, validation |
 | **Retry / Backoff** | Exponential backoff with jitter, permanent error classification |
+| **DLQ** | Dead-letter queue with automatic routing after N failed deliveries |
 | **Subject validation** | Catches malformed subjects before they hit the wire |
 | **Error classification** | `IsRetryable()` separates transient from permanent failures |
 | **Pluggable logger** | `Logger` interface — works with slog, zap, zerolog |
@@ -30,8 +33,10 @@ go get github.com/vsys-soham/natsx
 ```
 natsx/                        # Core client: connect, publish, subscribe, request
 ├── middleware/               # Built-in middleware (8 middlewares)
-├── jetstream/                # JetStream helpers: publish, subscribe, pull-subscribe
+├── jetstream/                # JetStream: streams, consumers, idempotent publish, DLQ
 ├── retry/                    # Retry policies with exponential backoff + jitter
+├── typed/                    # Generic type-safe publish/subscribe/request
+├── envelope/                 # Optional standard message envelope
 └── examples/
     ├── basic/main.go         # Core NATS demo
     └── jetstream/main.go     # JetStream demo
@@ -50,8 +55,8 @@ import (
     "log"
     "time"
 
-    "github.com/vsys-soham/natsx"
-    "github.com/vsys-soham/natsx/middleware"
+    "github.com/phoenix/natsx"
+    "github.com/phoenix/natsx/middleware"
 )
 
 func main() {
@@ -156,6 +161,15 @@ msg.RespondJSON(v)          error              // JSON reply
 msg.Respond(data)           error              // raw reply
 msg.Context()               context.Context    // get message context
 msg.WithContext(ctx)        *Msg               // set message context
+
+// JetStream ack helpers
+msg.Ack()                   error              // acknowledge
+msg.AckSync()               error              // ack + wait for server confirm
+msg.Nak()                   error              // negative ack (redeliver)
+msg.NakWithDelay(d)         error              // nak with redelivery delay
+msg.Term()                  error              // terminate (stop redelivery)
+msg.InProgress()            error              // reset redelivery timer
+msg.Metadata()              (*MsgMetadata, error)
 ```
 
 ### Subject Validation
@@ -170,18 +184,47 @@ natsx.ValidateSubject(subject) error  // empty, whitespace, bad dots
 natsx.IsRetryable(err) bool  // true for timeouts, disconnects; false for encoding, validation
 ```
 
-### JetStream (`github.com/vsys-soham/natsx/jetstream`)
+### JetStream (`github.com/phoenix/natsx/jetstream`)
 
 ```go
 js := jetstream.New(c)                       // create from natsx.Client
 js.JetStream(opts...)                        (nats.JetStreamContext, error)
+
+// Publish
 js.Publish(subj, data, opts...)              (*nats.PubAck, error)
 js.PublishJSON(subj, v, opts...)             (*nats.PubAck, error)
+js.PublishIdempotent(subj, msgID, data)      (*nats.PubAck, error)  // dedup via Nats-Msg-Id
+js.PublishJSONIdempotent(subj, msgID, v)     (*nats.PubAck, error)
+js.PublishAsync(subj, data)                  (PubAckFuture, error)
+
+// Subscribe
 js.Subscribe(subj, handler, opts...)         (*nats.Subscription, error)
 js.PullSubscribe(subj, durable, opts...)     (*nats.Subscription, error)
+js.SubscribeWithDLQ(subj, handler, dlqCfg)   (*nats.Subscription, error)
+
+// Stream management (idempotent — safe for startup)
+js.EnsureStream(cfg)                         (*nats.StreamInfo, error)
+js.EnsureConsumer(stream, cfg)               (*nats.ConsumerInfo, error)
+js.DeleteStream(name)                        error
+js.StreamInfo(name)                          (*nats.StreamInfo, error)
+js.ConsumerInfo(stream, consumer)            (*nats.ConsumerInfo, error)
 ```
 
-### Retry (`github.com/vsys-soham/natsx/retry`)
+**DLQ (Dead-Letter Queue):**
+
+```go
+js.SubscribeWithDLQ("orders.>", handler, jetstream.DLQConfig{
+    MaxDeliveries: 3,                  // route to DLQ after 3 failures
+    DLQSubject:    "dlq.orders",       // defaults to "dlq.<subject>"
+    OnDLQ: func(msg *natsx.Msg, count uint64) { /* callback */ },
+})
+
+// Reading from DLQ
+dlq := jetstream.ParseDLQ(msg)
+// dlq.OriginalSubject, dlq.DeliveryCount, dlq.Timestamp, dlq.Data
+```
+
+### Retry (`github.com/phoenix/natsx/retry`)
 
 ```go
 p := retry.DefaultPolicy()        // 3 attempts, 100ms initial, 2x multiplier, 0.2 jitter
@@ -198,7 +241,7 @@ retry.IsPermanent(err)             // check
 retry.ClassifyPermanent(err) bool  // use as Policy.Classifier
 ```
 
-### Middleware (`github.com/vsys-soham/natsx/middleware`)
+### Middleware (`github.com/phoenix/natsx/middleware`)
 
 ```go
 // Chain applies middlewares in order (first = outermost)
@@ -236,6 +279,29 @@ type MetricsRecorder interface {
 type Tracer interface {
     StartSpan(ctx context.Context, op string, msg *natsx.Msg) (context.Context, SpanContext, func())
 }
+```
+
+### Typed Generics (`github.com/phoenix/natsx/typed`)
+
+```go
+// Compile-time type safety — no manual json.Marshal/Unmarshal
+typed.Publish[Order](c, ctx, "orders.new", order)
+typed.Subscribe[Order](c, "orders.>", func(ctx context.Context, subj string, o Order) error {
+    return processOrder(o)
+})
+resp, err := typed.Request[AddReq, AddResp](c, ctx, "math.add", req)
+typed.QueueSubscribe[Event](c, "events.>", "workers", handler)
+```
+
+### Envelope (`github.com/phoenix/natsx/envelope`)
+
+```go
+// Optional metadata wrapper — opt-in, not required
+env := envelope.Wrap(order)                                    // auto ID + timestamp
+env := envelope.WrapWith(order, "order.created", "svc", cid)   // explicit metadata
+data, _ := env.Marshal()
+decoded, _ := envelope.Unmarshal[Order](data)
+// decoded.ID, decoded.Type, decoded.Source, decoded.CorrelationID, decoded.Timestamp, decoded.Data
 ```
 
 ### Health

@@ -3,6 +3,7 @@ package natsx
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/nats-io/nats.go"
 )
@@ -45,6 +46,52 @@ func (m *Msg) RespondJSON(v any) error {
 		return WrapError("Msg.RespondJSON", ErrEncoding)
 	}
 	return m.Respond(data)
+}
+
+// ---------- JetStream ack helpers ----------
+
+// AckSync acknowledges the message and waits for confirmation from the server.
+func (m *Msg) AckSync() error {
+	if err := m.Msg.AckSync(); err != nil {
+		return WrapError("Msg.AckSync", err)
+	}
+	return nil
+}
+
+// NakWithDelay negatively acknowledges the message, requesting redelivery
+// after the specified delay. Useful for implementing backoff on retries.
+func (m *Msg) NakWithDelay(delay time.Duration) error {
+	if err := m.Msg.NakWithDelay(delay); err != nil {
+		return WrapError("Msg.NakWithDelay", err)
+	}
+	return nil
+}
+
+// Term terminates the message, telling the server to stop redelivering it.
+// Use this for poison messages that should never be retried.
+func (m *Msg) Term() error {
+	if err := m.Msg.Term(); err != nil {
+		return WrapError("Msg.Term", err)
+	}
+	return nil
+}
+
+// InProgress resets the redelivery timer, signaling that the message is
+// still being processed. Call this periodically for long-running handlers.
+func (m *Msg) InProgress() error {
+	if err := m.Msg.InProgress(); err != nil {
+		return WrapError("Msg.InProgress", err)
+	}
+	return nil
+}
+
+// Metadata returns JetStream message metadata (stream, consumer, sequence, etc.).
+func (m *Msg) Metadata() (*nats.MsgMetadata, error) {
+	md, err := m.Msg.Metadata()
+	if err != nil {
+		return nil, WrapError("Msg.Metadata", err)
+	}
+	return md, nil
 }
 
 // MsgHandler is the handler function signature used for subscriptions.
