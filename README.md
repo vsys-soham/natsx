@@ -3,7 +3,7 @@
 A high-level, production-ready Go wrapper around [nats.go](https://github.com/nats-io/nats.go) — **robust, fast, and dead-simple**.
 
 ```
-go get github.com/phoenix/natsx
+go get github.com/vsys-soham/natsx
 ```
 
 ## Features
@@ -55,8 +55,8 @@ import (
     "log"
     "time"
 
-    "github.com/phoenix/natsx"
-    "github.com/phoenix/natsx/middleware"
+    "github.com/vsys-soham/natsx"
+    "github.com/vsys-soham/natsx/middleware"
 )
 
 func main() {
@@ -184,7 +184,7 @@ natsx.ValidateSubject(subject) error  // empty, whitespace, bad dots
 natsx.IsRetryable(err) bool  // true for timeouts, disconnects; false for encoding, validation
 ```
 
-### JetStream (`github.com/phoenix/natsx/jetstream`)
+### JetStream (`github.com/vsys-soham/natsx/jetstream`)
 
 ```go
 js := jetstream.New(c)                       // create from natsx.Client
@@ -224,7 +224,7 @@ dlq := jetstream.ParseDLQ(msg)
 // dlq.OriginalSubject, dlq.DeliveryCount, dlq.Timestamp, dlq.Data
 ```
 
-### Retry (`github.com/phoenix/natsx/retry`)
+### Retry (`github.com/vsys-soham/natsx/retry`)
 
 ```go
 p := retry.DefaultPolicy()        // 3 attempts, 100ms initial, 2x multiplier, 0.2 jitter
@@ -241,7 +241,7 @@ retry.IsPermanent(err)             // check
 retry.ClassifyPermanent(err) bool  // use as Policy.Classifier
 ```
 
-### Middleware (`github.com/phoenix/natsx/middleware`)
+### Middleware (`github.com/vsys-soham/natsx/middleware`)
 
 ```go
 // Chain applies middlewares in order (first = outermost)
@@ -281,7 +281,7 @@ type Tracer interface {
 }
 ```
 
-### Typed Generics (`github.com/phoenix/natsx/typed`)
+### Typed Generics (`github.com/vsys-soham/natsx/typed`)
 
 ```go
 // Compile-time type safety — no manual json.Marshal/Unmarshal
@@ -293,7 +293,7 @@ resp, err := typed.Request[AddReq, AddResp](c, ctx, "math.add", req)
 typed.QueueSubscribe[Event](c, "events.>", "workers", handler)
 ```
 
-### Envelope (`github.com/phoenix/natsx/envelope`)
+### Envelope (`github.com/vsys-soham/natsx/envelope`)
 
 ```go
 // Optional metadata wrapper — opt-in, not required
