@@ -18,13 +18,17 @@ go get github.com/vsys-soham/natsx
 | **Queue groups** | Built-in load-balanced subscriptions |
 | **JetStream** | Stream/consumer management, idempotent publish, DLQ, ack helpers |
 | **Middleware** | Composable chain — recovery, logging, timeout, metrics, tracing, correlation-ID, concurrency limit, validation |
+| **LogWith** | Context-aware log enrichment — auto-injects subject, correlation-ID, trace-ID |
 | **Retry / Backoff** | Exponential backoff with jitter, permanent error classification |
 | **DLQ** | Dead-letter queue with automatic routing after N failed deliveries |
+| **OpenTelemetry** | Drop-in `Tracer` + `MetricsRecorder` via `otel/` package |
+| **Health probes** | HTTP `/healthz` + `/readyz` handlers, `HealthCheck()` struct |
+| **Workers** | `QueueWorker` and `JetStreamWorker` with graceful shutdown, panic recovery, backoff |
+| **Config loading** | `FromEnv()`, `LoadFile()` (JSON), `ToOptions()` — zero external deps |
 | **Subject validation** | Catches malformed subjects before they hit the wire |
 | **Error classification** | `IsRetryable()` separates transient from permanent failures |
 | **Pluggable logger** | `Logger` interface — works with slog, zap, zerolog |
-| **Health checks** | `IsConnected()`, `Status()`, `Stats()` |
-| **Graceful shutdown** | `Close()` and `Drain()` |
+| **Graceful shutdown** | `Close()`, `Drain()`, worker context cancellation |
 
 ---
 
@@ -32,11 +36,14 @@ go get github.com/vsys-soham/natsx
 
 ```
 natsx/                        # Core client: connect, publish, subscribe, request
-├── middleware/               # Built-in middleware (8 middlewares)
+├── middleware/               # 8 built-in middlewares + LogWith enriched logger
 ├── jetstream/                # JetStream: streams, consumers, idempotent publish, DLQ
 ├── retry/                    # Retry policies with exponential backoff + jitter
 ├── typed/                    # Generic type-safe publish/subscribe/request
 ├── envelope/                 # Optional standard message envelope
+├── otel/                     # OpenTelemetry Tracer + MetricsRecorder adapters
+├── worker/                   # QueueWorker + JetStreamWorker with graceful shutdown
+├── config/                   # Config loading: FromEnv, LoadFile, ToOptions
 └── examples/
     ├── basic/main.go         # Core NATS demo
     └── jetstream/main.go     # JetStream demo
@@ -304,17 +311,111 @@ decoded, _ := envelope.Unmarshal[Order](data)
 // decoded.ID, decoded.Type, decoded.Source, decoded.CorrelationID, decoded.Timestamp, decoded.Data
 ```
 
-### Health
+### Log Enrichment (`github.com/vsys-soham/natsx/middleware`)
 
 ```go
-c.IsConnected()        bool
-c.Status()             ConnectionStatus
-c.Stats()              nats.Statistics
-c.ConnectedURL()       string
-c.ConnectedServerID()  string
+// Enriches every log call with subject, correlation_id, trace_id, span_id
+log := middleware.LogWith(c.Log(), msg)
+log.Info("processing order", "order_id", id)
+// → INFO processing order subject=orders.new correlation_id=abc trace_id=... order_id=123
 ```
 
----
+### Health (`github.com/vsys-soham/natsx`)
+
+```go
+// Programmatic
+hs := c.HealthCheck()
+// hs.Status ("ok" / "degraded" / "unavailable"), hs.Connected, hs.ServerURL ...
+
+// HTTP probe handlers (mount on your HTTP mux)
+mux.HandleFunc("/healthz", c.LivenessHandler())   // 200 unless closed; includes uptime
+mux.HandleFunc("/readyz",  c.ReadinessHandler())  // 200 if connected, 503 if not
+```
+
+### OpenTelemetry (`github.com/vsys-soham/natsx/otel`)
+
+```go
+// Drop-in implementations of middleware.Tracer and middleware.MetricsRecorder
+tracer   := otel.NewTracer(otel.TracerConfig{ServiceName: "my-svc"})
+recorder := otel.NewMetricsRecorder(otel.MetricsConfig{ServiceName: "my-svc"})
+
+c.Subscribe("orders.>", handler,
+    middleware.Tracing(tracer, "process-order"),
+    middleware.Metrics(recorder),
+)
+
+// Inject span context into outgoing NATS messages (W3C traceparent header)
+otel.InjectHeaders(ctx, outgoingMsg)
+```
+
+Instruments created: `nats.messages.received`, `nats.messages.processed`, `nats.messages.failed`, `nats.messages.duration` (all with `nats.subject` attribute).
+
+### Workers (`github.com/vsys-soham/natsx/worker`)
+
+```go
+// Queue subscribe worker — fanout to N goroutines, panic recovery, graceful shutdown
+w := worker.NewQueueWorker(c, worker.QueueWorkerConfig{
+    Subject:     "orders.>",
+    Queue:       "order-processors",
+    Concurrency: 4,
+    Middlewares: []natsx.Middleware{middleware.Logging(log)},
+}, func(msg *natsx.Msg) {
+    // process message
+})
+ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
+go w.Run(ctx) // blocks until ctx cancelled
+
+// JetStream worker — explicit ack semantics + exponential backoff
+jsw := worker.NewJetStreamWorker(c, worker.JetStreamWorkerConfig{
+    Stream:        "ORDERS",
+    Subject:       "orders.>",
+    Durable:       "order-worker",
+    Concurrency:   2,
+    MaxDeliveries: 5,              // after 5 attempts → DLQ
+    AckWait:       30 * time.Second,
+}, func(ctx context.Context, msg *natsx.Msg) error {
+    if err := processOrder(msg); err != nil {
+        return err                 // → NakWithDelay (exponential backoff)
+    }
+    return nil                     // → AckSync
+    // return worker.ErrTerminate  // → Term (stop redelivery)
+})
+go jsw.Run(ctx)
+```
+
+### Config (`github.com/vsys-soham/natsx/config`)
+
+```go
+// Load from environment variables (NATS_URL, NATS_NAME, NATS_TOKEN, ...)
+cfg := config.FromEnv()
+
+// Load from JSON file (durations as "2s", "500ms")
+cfg, err := config.LoadFile("nats.config.json")
+
+// Validate and connect
+if err := cfg.Validate(); err != nil { log.Fatal(err) }
+c, err := config.Connect(cfg, natsx.WithLogger(mylog))
+
+// Or get the options and compose yourself
+opts := cfg.ToOptions()
+c, err := natsx.Connect(opts...)
+```
+
+**Supported env vars:** `NATS_URL`, `NATS_NAME`, `NATS_TOKEN`, `NATS_USERNAME`, `NATS_PASSWORD`, `NATS_CREDS_FILE`, `NATS_NKEY_FILE`, `NATS_MAX_RECONNECTS`, `NATS_RECONNECT_WAIT`, `NATS_CONNECT_TIMEOUT`, `NATS_DRAIN_TIMEOUT`
+
+```json
+{
+  "url": "nats://localhost:4222",
+  "name": "my-service",
+  "max_reconnects": -1,
+  "reconnect_wait": "2s",
+  "connect_timeout": "5s",
+  "drain_timeout": "10s"
+}
+```
+
+
 
 ## Custom Middleware
 
@@ -355,3 +456,7 @@ Tests use an **in-process NATS server** — no external dependencies needed:
 ```bash
 go test -v -race -count=1 ./...
 ```
+
+## License
+
+MIT
