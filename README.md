@@ -442,10 +442,49 @@ c.Subscribe("events.>", handler,
 
 ---
 
+---
+
 ## Examples
 
 See [`examples/basic/main.go`](examples/basic/main.go) and
 [`examples/jetstream/main.go`](examples/jetstream/main.go) for full runnable demos.
+
+---
+
+## Testing Utilities (`github.com/vsys-soham/natsx/natsxtest`)
+
+`natsxtest` provides an in-process NATS server and helpers so your tests have **zero external dependencies**:
+
+```go
+func TestOrderProcessor(t *testing.T) {
+    env := natsxtest.NewEnv(t)               // in-process server + connected client
+    // env is auto-closed when the test ends
+
+    // Subscribe before publishing
+    ch := env.Subscribe(t, "orders.new")
+    env.PublishJSON(t, "orders.new", Order{ID: "123", Amount: 50})
+
+    // Wait with timeout
+    msg := env.WaitForMessage(t, "orders.new", time.Second)
+    natsxtest.AssertSubject(t, msg, "orders.new")
+    natsxtest.AssertPayload(t, msg, expectedBytes)
+
+    // Typed assertion
+    order := natsxtest.AssertJSONPayload[Order](t, msg)
+
+    // Wait for N messages
+    msgs := env.WaitForN(t, "events.>", 5, 2*time.Second)
+
+    // Verify nothing unexpected was published
+    natsxtest.AssertNoMessage(t, ch, 100*time.Millisecond)
+}
+
+// JetStream tests
+func TestJetStreamHandler(t *testing.T) {
+    env := natsxtest.NewJetStreamEnv(t)       // JetStream enabled + env.JS available
+    // ... use env.JS to create streams/consumers
+}
+```
 
 ---
 
@@ -454,9 +493,7 @@ See [`examples/basic/main.go`](examples/basic/main.go) and
 Tests use an **in-process NATS server** — no external dependencies needed:
 
 ```bash
+# Run full test suite (all packages, race detector)
 go test -v -race -count=1 ./...
 ```
 
-## License
-
-MIT

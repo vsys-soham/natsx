@@ -53,7 +53,7 @@ func TestQueueWorker_ProcessesMessages(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	go w.Run(ctx) //nolint:errcheck
+	go w.Run(ctx)                     //nolint:errcheck
 	time.Sleep(50 * time.Millisecond) // let subscription set up
 
 	// Publish 5 messages
